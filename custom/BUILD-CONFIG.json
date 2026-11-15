@@ -1,7 +1,7 @@
 {
   "custom_version": 32888,
   "custom_manager_version_code": 32888,
-  "custom_manager_version_name": "v3.3.1-32888-zfovik",
+  "custom_manager_version_name": "v3.3.1-32888",
   "custom_uapi_version": 8,
   "upstream_repository": "https://github.com/tiann/KernelSU",
   "upstream_commit": "64833c005eca6a8dc3d73ec2d37d84c37e0d9ad2",
@@ -13,7 +13,7 @@
   "manager_source_changes": ["manager/build.gradle.kts: fixed Manager version code 32888 and custom version name"],
   "ksud_source_changes": ["userspace/ksud/build.rs: explicit paired-build version overrides"],
   "uapi_source_changes": ["uapi/supercall.h: local paired-build compatibility level 8; wire layout unchanged"],
-  "manager_package": "me.weishu.kernelsu.pr",
-  "manager_authentication": "ephemeral PR key shared with LKM within each Actions run",
+  "manager_package": "me.weishu.kernelsu",
+  "manager_authentication": "ephemeral custom key shared with LKM within each Actions run",
   "device_tested": false
 }

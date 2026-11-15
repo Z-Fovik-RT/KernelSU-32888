@@ -13,4 +13,4 @@ extra["androidCompileNdkVersion"] = libs.versions.ndk.get()
 extra["androidSourceCompatibility"] = JavaVersion.VERSION_21
 extra["androidTargetCompatibility"] = JavaVersion.VERSION_21
 extra["managerVersionCode"] = 32888
-extra["managerVersionName"] = "v3.3.1-32888-zfovik"
+extra["managerVersionName"] = "v3.3.1-32888"
