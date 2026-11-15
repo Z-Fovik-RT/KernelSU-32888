@@ -182,13 +182,15 @@ def certificate_sha256(apk_path):
     )
     if result.returncode:
         raise ApkError(f"apksigner failed: {result.stderr.strip() or result.stdout.strip()}")
-    match = re.search(
-        r"Signer #1 certificate SHA-256 digest:\s*([0-9a-fA-F:]+)",
-        result.stdout,
+    matches = re.findall(
+        r"certificate SHA-256 digest:\s*([0-9a-fA-F:]+)",
+        result.stdout + chr(10) + result.stderr,
+        flags=re.IGNORECASE,
     )
-    if not match:
+    fingerprints = {value.replace(":", "").lower() for value in matches}
+    if len(fingerprints) != 1 or len(next(iter(fingerprints))) != 64:
         raise ApkError("apksigner did not report a signer SHA-256 fingerprint")
-    return match.group(1).replace(":", "").lower()
+    return fingerprints.pop()
 
 
 def manager_uapi_from_jni(data):
