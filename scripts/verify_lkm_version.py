@@ -13,7 +13,72 @@ class ElfError(ValueError):
     pass
 
 
-def inspect_module(path, expected_version):
+def verify_reported_constant(code, expected, function_name, register_width):
+    # Decode the AArch64 MOVZ/MOVK sequence used to initialize struct fields.
+    registers = {}
+    for offset in range(0, len(code) - 3, 4):
+        word = struct.unpack_from("<I", code, offset)[0]
+        if word & 0x1F800000 != 0x12800000:
+            continue
+        width = 64 if word >> 31 else 32
+        if width != register_width:
+            continue
+        opc = (word >> 29) & 0x3
+        hw = (word >> 21) & 0x3
+        imm16 = (word >> 5) & 0xFFFF
+        register = word & 0x1F
+        if hw * 16 >= width:
+            raise ElfError(f"{function_name}: invalid MOV-wide shift")
+        full_mask = (1 << width) - 1
+        if opc == 2:
+            registers[register] = (imm16 << (hw * 16)) & full_mask
+        elif opc == 3 and register in registers:
+            mask = 0xFFFF << (hw * 16)
+            registers[register] = ((registers[register] & ~mask) | (imm16 << (hw * 16))) & full_mask
+        else:
+            continue
+        if registers[register] == expected:
+            return offset
+    raise ElfError(f"{function_name}: expected compiled version {expected} not found")
+
+
+def verify_uapi_store(code, constant_offset, function_name):
+    register = struct.unpack_from("<I", code, constant_offset)[0] & 0x1F
+    for offset in range(constant_offset + 4, len(code) - 3, 4):
+        word = struct.unpack_from("<I", code, offset)[0]
+        # 64-bit STR (unsigned immediate), with the byte offset scaled by 8.
+        if word & 0xFFC00000 != 0xF9000000 or word & 0x1F != register:
+            continue
+        if (word >> 5) & 0x1F != 31:
+            continue
+        stack_offset = ((word >> 10) & 0xFFF) * 8
+        if stack_offset == 16:
+            return offset
+        break
+    raise ElfError(f"{function_name}: uapi_version is not stored at GET_INFO offset 16")
+
+
+def verify_version_store(code, constant_offset, function_name):
+    register = struct.unpack_from("<I", code, constant_offset)[0] & 0x1F
+    for offset in range(constant_offset + 4, len(code) - 3, 4):
+        word = struct.unpack_from("<I", code, offset)[0]
+        # STP Wt, Wt2, [SP, #imm] (signed, scaled pair offset).
+        if word & 0xFFC00000 != 0x29000000 or (word >> 5) & 0x1F != 31:
+            continue
+        first_register = word & 0x1F
+        second_register = (word >> 10) & 0x1F
+        pair_offset = (word >> 15) & 0x7F
+        if pair_offset & 0x40:
+            pair_offset -= 0x80
+        if first_register == register and pair_offset * 4 == 8:
+            return offset
+        if second_register == register and pair_offset * 4 == 12:
+            return offset
+        break
+    raise ElfError(f"{function_name}: version field is not stored at GET_INFO offset 8")
+
+
+def inspect_module(path, expected_version, expected_uapi):
     data = path.read_bytes()
     if len(data) < 64 or data[:6] != b"\x7fELF\x02\x01":
         raise ElfError("Expected a little-endian ELF64 module")
@@ -71,19 +136,20 @@ def inspect_module(path, expected_version):
         code = section_bytes(index)
         if value + size > len(code):
             raise ElfError("Version handler extends outside its section")
-        constants = []
-        for instruction_offset in range(value, value + size, 4):
-            instruction = struct.unpack_from("<I", code, instruction_offset)[0]
-            # AArch64 MOVZ Wd, #imm16, LSL #shift (MOV is its usual alias).
-            if instruction & 0xFF800000 == 0x52800000:
-                shift = ((instruction >> 21) & 3) * 16
-                if shift < 32:
-                    constants.append(((instruction >> 5) & 0xFFFF) << shift)
-        if expected_version not in constants:
-            raise ElfError(
-                f"{name}: expected version {expected_version} not found; MOVZ constants={constants}"
+        function_code = code[value : value + size]
+        entry = {"version": expected_version, "section": section_names[index], "offset": hex(value)}
+        if name == "do_get_info":
+            version_constant_offset = verify_reported_constant(
+                function_code, expected_version, name, 32
             )
-        found[name] = {"version": expected_version, "section": section_names[index], "offset": hex(value)}
+            verify_version_store(function_code, version_constant_offset, name)
+            # Current GET_INFO stores { features, uapi_version } as one 64-bit value in x8.
+            uapi_constant = expected_uapi * 2**32 + 7
+            uapi_offset = verify_reported_constant(function_code, uapi_constant, name + ".uapi", 64)
+            verify_uapi_store(function_code, uapi_offset, name)
+            entry["uapi_version"] = expected_uapi
+            entry["uapi_store_offset"] = 16
+        found[name] = entry
     if set(found) != wanted:
         raise ElfError("Both GET_INFO handlers must contain the expected compiled version")
 
@@ -101,6 +167,7 @@ def inspect_module(path, expected_version):
         "sha256": hashlib.sha256(data).hexdigest(),
         "version_verified": True,
         "reported_version": expected_version,
+        "reported_uapi_version": expected_uapi,
         "version_handlers": found,
         "architecture": "aarch64",
         "target_kmi": "android17-6.18",
@@ -114,14 +181,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("module", type=Path)
     parser.add_argument("--expected-version", type=int, default=32888)
+    parser.add_argument("--expected-uapi", type=int, default=8)
     parser.add_argument("--build-commit")
     parser.add_argument("--source-baseline")
     parser.add_argument("--json-output", type=Path)
     args = parser.parse_args()
-    if not 0 < args.expected_version <= 0xFFFF:
-        parser.error("This verifier supports positive 16-bit custom versions only")
+    if not 0 < args.expected_version <= 0xFFFFFFFF:
+        parser.error("The expected version must be a positive 32-bit integer")
+    if not 0 < args.expected_uapi <= 0xFFFF:
+        parser.error("The UAPI version must be a positive 16-bit integer")
     try:
-        result = inspect_module(args.module, args.expected_version)
+        result = inspect_module(args.module, args.expected_version, args.expected_uapi)
     except (OSError, ValueError, struct.error) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1
