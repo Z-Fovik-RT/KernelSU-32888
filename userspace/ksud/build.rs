@@ -225,13 +225,24 @@ fn assemble_bootstrap() {
 fn main() {
     assemble_bootstrap();
 
-    let (code, name) = match get_git_version() {
-        Ok((code, name)) => (code, name),
-        Err(_) => {
-            // show warning if git is not installed
-            println!("cargo:warning=Failed to get git version, using 0.0.0");
-            (0, "0.0.0".to_string())
+    println!("cargo:rerun-if-env-changed=KSU_VERSION_CODE");
+    println!("cargo:rerun-if-env-changed=KSU_VERSION_NAME");
+    let (code, name) = match (env::var("KSU_VERSION_CODE"), env::var("KSU_VERSION_NAME")) {
+        (Ok(code), Ok(name)) => (
+            code.parse::<u32>()
+                .expect("KSU_VERSION_CODE must be a positive integer"),
+            name,
+        ),
+        (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => {
+            match get_git_version() {
+                Ok(version) => version,
+                Err(_) => {
+                    println!("cargo:warning=Failed to get git version, using 0.0.0");
+                    (0, "0.0.0".to_string())
+                }
+            }
         }
+        _ => panic!("KSU_VERSION_CODE and KSU_VERSION_NAME must be set together"),
     };
     if env::var("KSU_PACKAGE_NAME").is_err() {
         println!("cargo:rustc-env=KSU_PACKAGE_NAME=me.weishu.kernelsu");

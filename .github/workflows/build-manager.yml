@@ -13,8 +13,11 @@ on:
       - '.github/scripts/setup-rust-build.sh'
       - '.github/riscv64-cargo.toml'
       - 'repack_apk.py'
+      - 'scripts/verify_lkm_version.py'
+      - 'scripts/verify_manager_apk.py'
       - 'manager/**'
       - 'kernel/**'
+      - 'uapi/**'
       - 'userspace/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
@@ -30,8 +33,11 @@ on:
       - '.github/scripts/setup-rust-build.sh'
       - '.github/riscv64-cargo.toml'
       - 'repack_apk.py'
+      - 'scripts/verify_lkm_version.py'
+      - 'scripts/verify_manager_apk.py'
       - 'manager/**'
       - 'kernel/**'
+      - 'uapi/**'
       - 'userspace/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
@@ -62,7 +68,7 @@ jobs:
             -validity 1 \
             -storepass "$KEYSTORE_PASSWORD" \
             -keypass "$KEY_PASSWORD" \
-            -dname "CN=KernelSU PR Build" \
+            -dname "CN=KernelSU Custom 32888" \
             -storetype JKS \
             -keystore pr-key.jks
 
@@ -194,17 +200,35 @@ jobs:
       - name: Build with Gradle
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            ./gradlew clean assembleRelease -PIS_PR_BUILD=true
+            ./gradlew clean assembleRelease \
+              -PKSU_VERSION_CODE=32888 \
+              -PKSU_VERSION_NAME=v3.3.1-32888
           else
             ./gradlew clean assembleRelease
           fi
+
+      - name: Record matching manager metadata
+        if: github.event_name == 'pull_request'
+        working-directory: .
+        run: |
+          set -euo pipefail
+          mkdir -p out/manager
+          printf '%s\n' \
+            'manager_version_code=32888' \
+            'manager_version_name=v3.3.1-32888' \
+            'manager_package=me.weishu.kernelsu' \
+            'uapi_version=8' > out/manager/BUILD_INFO.txt
 
       - name: Upload build artifact
         if: ${{ github.event_name == 'pull_request' || (github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')) || github.ref_type == 'tag' }}
         uses: actions/upload-artifact@v7
         with:
           name: manager-gradle
-          path: manager/app/build/outputs/apk/release/*.apk
+          path: |
+            manager/app/build/outputs/apk/release/*.apk
+            manager/app/build/outputs/apk/release/output-metadata.json
+            out/manager/BUILD_INFO.txt
+          if-no-files-found: error
 
       - name: Upload mappings
         uses: actions/upload-artifact@v7
@@ -257,6 +281,13 @@ jobs:
           name: ksud-riscv64-linux-android
           path: artifacts/ksud-riscv64-linux-android
 
+      - name: Download ARM64 Android 17 LKM
+        if: github.event_name == 'pull_request'
+        uses: actions/download-artifact@v8
+        with:
+          name: aarch64-android17-6.18-lkm
+          path: artifacts/aarch64-android17-6.18-lkm
+
       - name: Place manager apk and ksud artifacts
         run: |
           mkdir -p manager/app/build/outputs/apk/release
@@ -276,6 +307,33 @@ jobs:
           cp -f "$ARM64_KSUD" target/aarch64-linux-android/release/ksud
           cp -f "$X86_64_KSUD" target/x86_64-linux-android/release/ksud
           cp -f "$RISCV64_KSUD" target/riscv64-linux-android/release/ksud
+
+      - name: Verify Android 17 ARM64 LKM and matching Manager build inputs
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          mkdir -p out/manager
+          cp artifacts/manager-gradle/out/manager/BUILD_INFO.txt out/manager/BUILD_INFO.txt
+          GRADLE_MANAGER_APK=$(find artifacts/manager-gradle -type f -name '*.apk' | head -n 1)
+          test -n "$GRADLE_MANAGER_APK"
+          python3 scripts/verify_lkm_version.py \
+            artifacts/aarch64-android17-6.18-lkm/android17-6.18_kernelsu.ko \
+            --expected-version 32888 \
+            --expected-uapi 8 \
+            --source-baseline 64833c005eca6a8dc3d73ec2d37d84c37e0d9ad2 \
+            --build-commit "$(git rev-parse HEAD)" \
+            --json-output out/manager/LKM_INFO.json
+          test "$(grep -c '^static const __u32 KERNEL_SU_UAPI_VERSION = 8;' uapi/supercall.h)" -eq 1
+          grep -Fx 'override KSU_VERSION := 32888' kernel/Kbuild
+          test -s artifacts/manager-gradle/manager/app/build/outputs/apk/release/output-metadata.json
+          test -s artifacts/manager-gradle/out/manager/BUILD_INFO.txt
+          python3 scripts/verify_manager_apk.py \
+            "$GRADLE_MANAGER_APK" \
+            --gradle-metadata artifacts/manager-gradle/manager/app/build/outputs/apk/release/output-metadata.json \
+            --build-info artifacts/manager-gradle/out/manager/BUILD_INFO.txt \
+            --expected-package me.weishu.kernelsu \
+            --expected-version-code 32888 \
+            --expected-version-name v3.3.1-32888
 
       - name: Prepare signing inputs
         if: ${{ github.event_name == 'pull_request' || (github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')) || github.ref_type == 'tag' }}
@@ -318,12 +376,44 @@ jobs:
             -S "$SIGN_KEY_PASSWORD" \
             --strip
 
+      - name: Verify final paired APK and signing certificate
+        if: github.event_name == 'pull_request'
+        env:
+          EXPECTED_CERT_SHA256: ${{ needs.generate-key.outputs.expected_hash }}
+        run: |
+          set -euo pipefail
+          APK=$(find dist -type f -name '*.apk' | head -n 1)
+          test -n "$APK"
+          python3 scripts/verify_manager_apk.py \
+            "$APK" \
+            --gradle-metadata artifacts/manager-gradle/manager/app/build/outputs/apk/release/output-metadata.json \
+            --build-info artifacts/manager-gradle/out/manager/BUILD_INFO.txt \
+            --expected-package me.weishu.kernelsu \
+            --expected-version-code 32888 \
+            --expected-version-name v3.3.1-32888 \
+            --expected-signer-sha256 "$EXPECTED_CERT_SHA256" \
+            --json-output out/manager/MANAGER_INFO.json
+          cp artifacts/aarch64-android17-6.18-lkm/android17-6.18_kernelsu.ko out/manager/kernelsu_32888_uapi8_android17-6.18.ko
+          cp dist/*.apk out/manager/
+          cp custom/BUILD-CONFIG.json out/manager/SOURCE_CONFIG.json
+          cd out/manager
+          sha256sum *.ko *.apk > SHA256SUMS.txt
+
       - name: Upload build artifact
         if: ${{ github.event_name == 'pull_request' || (github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')) || github.ref_type == 'tag' }}
         uses: actions/upload-artifact@v7
         with:
           name: manager
           path: dist/*.apk
+
+      - name: Upload paired KernelSU 32888 build metadata
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ZFovikRT-KernelSU-32888-pair
+          path: out/manager/
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload to telegram
         if: github.event_name != 'pull_request' && steps.need_upload.outputs.UPLOAD == 'true'
