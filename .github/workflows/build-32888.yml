@@ -1,0 +1,70 @@
+name: Build Z-Fovik-RT LKM 32888
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lkm-32888-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ARM64 android17-6.18 version 32888
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ghcr.io/ylarod/ddk-min:android17-6.18-20260828@sha256:fb8b66200bf402cf65a751060fc1aa29524b9fa8840feef16c7b196a4f3f0e6e
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout custom source
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Build module
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p out
+          grep -Fx 'override KSU_VERSION := 32888' kernel/Kbuild
+          cd kernel
+          CONFIG_KSU=m CC=clang make 2>&1 | tee ../out/build.log
+
+      - name: Verify reported LKM version and record provenance
+        run: |
+          set -euo pipefail
+          cp kernel/kernelsu.ko out/kernelsu_32888_android17-6.18.ko
+          llvm-strip -d out/kernelsu_32888_android17-6.18.ko
+          python3 scripts/verify_lkm_version.py \
+            out/kernelsu_32888_android17-6.18.ko \
+            --expected-version 32888 \
+            --source-baseline 64833c005eca6a8dc3d73ec2d37d84c37e0d9ad2 \
+            --build-commit "$(git rev-parse HEAD)" \
+            --json-output out/BUILD_INFO.json
+          llvm-readelf -h -S out/kernelsu_32888_android17-6.18.ko > out/ELF_INFO.txt
+          cp custom/BUILD-CONFIG.json out/SOURCE_CONFIG.json
+          cd out
+          sha256sum kernelsu_32888_android17-6.18.ko > SHA256SUMS.txt
+
+      - name: Upload verified module
+        uses: actions/upload-artifact@v7
+        with:
+          name: ZFovikRT-KernelSU-32888-android17-6.18
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ZFovikRT-KernelSU-32888-failed-build-log
+          path: out/build.log
+          if-no-files-found: ignore

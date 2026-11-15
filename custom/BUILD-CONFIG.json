@@ -1,0 +1,13 @@
+{
+  "custom_version": 32888,
+  "upstream_repository": "https://github.com/tiann/KernelSU",
+  "upstream_commit": "64833c005eca6a8dc3d73ec2d37d84c37e0d9ad2",
+  "upstream_reported_version": 32730,
+  "architecture": "aarch64",
+  "kmi": "android17-6.18",
+  "ddk_image": "ghcr.io/ylarod/ddk-min:android17-6.18-20260828@sha256:fb8b66200bf402cf65a751060fc1aa29524b9fa8840feef16c7b196a4f3f0e6e",
+  "kernel_source_changes": ["kernel/Kbuild: fixed reported version to 32888"],
+  "manager_package": "me.weishu.kernelsu",
+  "manager_authentication": "unchanged upstream certificate defaults",
+  "device_tested": false
+}
