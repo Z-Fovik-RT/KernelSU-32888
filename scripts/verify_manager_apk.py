@@ -191,6 +191,36 @@ def certificate_sha256(apk_path):
     return match.group(1).replace(":", "").lower()
 
 
+def manager_uapi_from_jni(data):
+    """Read the constant-return JNI export produced by the pinned ARM64 build."""
+    if data[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<H", data, 18)[0] != 183:
+        raise ApkError("Manager JNI is not an ARM64 ELF64 library")
+    shoff = struct.unpack_from("<Q", data, 40)[0]
+    entsize, count = struct.unpack_from("<HH", data, 58)
+    sections = [struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * entsize) for i in range(count)]
+    for section in sections:
+        if section[1] != 11:
+            continue
+        strings = sections[section[6]]
+        names = data[strings[4]:strings[4] + strings[5]]
+        for offset in range(section[4], section[4] + section[5], section[9]):
+            no, info, _, idx, value, size = struct.unpack_from("<IBBHQQ", data, offset)
+            name = names[no:names.index(b"\0", no)]
+            if name != b"Java_me_weishu_kernelsu_Natives_getManagerUAPIVersion":
+                continue
+            if idx >= len(sections) or info & 15 != 2:
+                raise ApkError("Invalid UAPI JNI symbol")
+            code = sections[idx]
+            start = code[4] + value - code[3]
+            if size != 8:
+                raise ApkError("Unknown UAPI JNI code layout; inspect it before accepting")
+            move, ret = struct.unpack_from("<II", data, start)
+            if move & 0xFFE0001F != 0x52800000 or ret != 0xD65F03C0:
+                raise ApkError("UAPI JNI must be MOV W0, immediate; RET")
+            return (move >> 5) & 0xFFFF
+    raise ApkError("Manager UAPI JNI export was not found")
+
+
 def verify(apk_path, gradle_metadata_path, build_info_path, expected_package,
            expected_version_code, expected_version_name, expected_uapi,
            expected_signer_sha256=None):
@@ -198,10 +228,13 @@ def verify(apk_path, gradle_metadata_path, build_info_path, expected_package,
     try:
         with zipfile.ZipFile(apk_path) as apk:
             manifest_xml = apk.read("AndroidManifest.xml")
+            native_uapi = manager_uapi_from_jni(apk.read("lib/arm64-v8a/libkernelsu.so"))
     except (OSError, KeyError, zipfile.BadZipFile) as error:
         raise ApkError(f"Cannot read APK AndroidManifest.xml: {error}") from error
 
     manifest = parse_manifest_axml(manifest_xml)
+    if native_uapi != expected_uapi:
+        raise ApkError(f"Compiled Manager JNI UAPI {native_uapi}, expected {expected_uapi}")
     gradle = parse_gradle_metadata(Path(gradle_metadata_path))
     build_info = parse_build_info(Path(build_info_path))
     expected = {
@@ -237,7 +270,8 @@ def verify(apk_path, gradle_metadata_path, build_info_path, expected_package,
         "package": manifest["package"],
         "version_code": manifest["version_code"],
         "version_name": manifest["version_name"],
-        "uapi_version": expected_uapi,
+        "uapi_version": native_uapi,
+        "uapi_verified_in_native_library": True,
         "signer_sha256": actual_signer or expected_signer_sha256,
         "gradle_metadata": gradle,
     }

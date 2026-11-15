@@ -58,10 +58,13 @@ def verify_uapi_store(code, constant_offset, function_name):
     raise ElfError(f"{function_name}: uapi_version is not stored at GET_INFO offset 16")
 
 
-def verify_version_store(code, constant_offset, function_name):
+def verify_version_store(code, constant_offset, function_name, stack_offset):
     register = struct.unpack_from("<I", code, constant_offset)[0] & 0x1F
     for offset in range(constant_offset + 4, len(code) - 3, 4):
         word = struct.unpack_from("<I", code, offset)[0]
+        if (word & 0xFFC003E0) == 0xB90003E0 and (word & 0x1F) == register:
+            if ((word >> 10) & 0xFFF) * 4 == stack_offset:
+                return offset
         # STP Wt, Wt2, [SP, #imm] (signed, scaled pair offset).
         if word & 0xFFC00000 != 0x29000000 or (word >> 5) & 0x1F != 31:
             continue
@@ -70,12 +73,11 @@ def verify_version_store(code, constant_offset, function_name):
         pair_offset = (word >> 15) & 0x7F
         if pair_offset & 0x40:
             pair_offset -= 0x80
-        if first_register == register and pair_offset * 4 == 8:
+        if first_register == register and pair_offset * 4 == stack_offset:
             return offset
-        if second_register == register and pair_offset * 4 == 12:
+        if second_register == register and pair_offset * 4 + 4 == stack_offset:
             return offset
-        break
-    raise ElfError(f"{function_name}: version field is not stored at GET_INFO offset 8")
+    raise ElfError(f"{function_name}: version field store not found at SP+{stack_offset}")
 
 
 def inspect_module(path, expected_version, expected_uapi):
@@ -138,11 +140,13 @@ def inspect_module(path, expected_version, expected_uapi):
             raise ElfError("Version handler extends outside its section")
         function_code = code[value : value + size]
         entry = {"version": expected_version, "section": section_names[index], "offset": hex(value)}
+        version_constant_offset = verify_reported_constant(
+            function_code, expected_version, name, 32
+        )
+        if name == "do_get_info_legacy":
+            verify_version_store(function_code, version_constant_offset, name, 12)
         if name == "do_get_info":
-            version_constant_offset = verify_reported_constant(
-                function_code, expected_version, name, 32
-            )
-            verify_version_store(function_code, version_constant_offset, name)
+            verify_version_store(function_code, version_constant_offset, name, 8)
             # Current GET_INFO stores { features, uapi_version } as one 64-bit value in x8.
             uapi_constant = expected_uapi * 2**32 + 7
             uapi_offset = verify_reported_constant(function_code, uapi_constant, name + ".uapi", 64)
